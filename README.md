@@ -1,0 +1,2 @@
+# BlokusProjekt2026_27
+Software Challenge Blokus
