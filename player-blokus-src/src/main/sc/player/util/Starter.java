@@ -36,6 +36,7 @@ public class Starter {
   }
 
   public static void main(String[] args) {
+    System.out.println("STARTER WURDE GESTARTET");
     System.setProperty("file.encoding", "UTF-8");
 
     // Parameter definieren
@@ -66,6 +67,7 @@ public class Starter {
 
     // einen neuen client erzeugen
     try {
+      System.out.println("VERSUCHE CLIENT ZU STARTEN");
       new Starter(host, port, reservation, room);
     } catch (Exception e) {
       logger.error("Beim Starten des Clients ist ein Fehler aufgetreten:", e);

@@ -8,6 +8,8 @@ import sc.plugin2027.GameState;
 import sc.shared.GameResult;
 
 import java.util.List;
+import sc.api.plugins.ITeam;
+import sc.api.plugins.Team;
 
 /**
  * Das Herz des Clients:
@@ -16,6 +18,8 @@ import java.util.List;
  * Ausserdem werden zum Spielverlauf Konsolenausgaben gemacht.
  */
 public class Logic implements IGameHandler {
+  private static final int MAX_MOVES = 12;
+  private static final long TIME_LIMIT = 1_300_000_000L;
   private static final Logger log = LoggerFactory.getLogger(Logic.class);
 
   /** Aktueller Spielstatus. */
@@ -25,15 +29,128 @@ public class Logic implements IGameHandler {
    * um euren nächsten Zug zu planen. */
   @Override
   public Move calculateMove() {
-    long startTime = System.currentTimeMillis();
-    log.info("Es wurde ein Zug von {} angefordert.", gameState.getCurrentTeam());
 
-    List<Move> possibleMoves = gameState.getSensibleMoves();
+    long deadline = System.nanoTime() + TIME_LIMIT;
 
+    List<Move> moves = gameState.getSensibleMoves();
 
-    Move move = possibleMoves.get(0);
-    log.info("Sende {} nach {}ms.", move, System.currentTimeMillis() - startTime);
-    return move;
+    if (moves.isEmpty()) {
+      return null;
+    }
+
+    // Sicherer Standardzug
+    Move bestMove = moves.get(0);
+
+    ITeam myTeam = gameState.getCurrentTeam();
+
+    int bestScore = Integer.MIN_VALUE;
+
+    // Zunächst höchstens 12 Züge untersuchen
+    int limit = Math.min(moves.size(), MAX_MOVES);
+
+    for (int i = 0; i < limit; i++) {
+
+      if (System.nanoTime() >= deadline) {
+        break;
+      }
+
+      Move move = moves.get(i);
+
+      try {
+        // Spielstand kopieren
+        GameState copy = gameState.clone();
+
+        // Zug simulieren
+        copy.performMoveDirectly(move);
+
+        // Ergebnis bewerten
+        int score = bewerten(copy, myTeam);
+
+        if (score > bestScore) {
+          bestScore = score;
+          bestMove = move;
+        }
+
+      } catch (NoSuchMethodError e) {
+
+        log.error("Fehler bei der Zugsimulation!", e);
+
+        // Zur Sicherheit einen gültigen Zug zurückgeben
+        return bestMove;
+      }
+    }
+
+    log.info("Gewählter Zug: {} | Bewertung: {}", bestMove, bestScore);
+
+    return bestMove;
+  }
+  private int minimax(
+          GameState state,
+          int depth,
+          ITeam myTeam,
+          long deadline) {
+
+    if (depth == 0 ||
+            state.isOver() ||
+            System.nanoTime() >= deadline) {
+
+      return bewerten(state, myTeam);
+    }
+
+    List<Move> moves = state.getSensibleMoves();
+
+    if (moves.isEmpty()) {
+      return bewerten(state, myTeam);
+    }
+
+    boolean maximizing =
+            state.getCurrentTeam().equals(myTeam);
+
+    int best;
+
+    if (maximizing) {
+      best = Integer.MIN_VALUE;
+    } else {
+      best = Integer.MAX_VALUE;
+    }
+
+    int limit = Math.min(moves.size(), MAX_MOVES);
+
+    for (int i = 0; i < limit; i++) {
+
+      if (System.nanoTime() >= deadline) {
+        break;
+      }
+
+      GameState copy = state.clone();
+      copy.performMoveDirectly(moves.get(i));
+
+      int score = minimax(
+              copy,
+              depth - 1,
+              myTeam,
+              deadline
+      );
+
+      if (maximizing) {
+        best = Math.max(best, score);
+      } else {
+        best = Math.min(best, score);
+      }
+    }
+
+    return best;
+  }private int bewerten(GameState state, ITeam myTeam) {
+
+    ITeam enemyTeam = myTeam.equals(Team.ONE)
+            ? Team.TWO
+            : Team.ONE;
+
+    int myPoints = state.getPointsForTeam(myTeam)[0];
+
+    int enemyPoints = state.getPointsForTeam(enemyTeam)[0];
+
+    return myPoints - enemyPoints;
   }
 
   /** Ein neuer Spielstatus ist verfügbar, d.h. ein Zug wurde erfolgreich ausgeführt. */
