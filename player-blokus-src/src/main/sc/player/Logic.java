@@ -31,9 +31,7 @@ public class Logic implements IGameHandler {
     List<Move> possibleMoves = gameState.getSensibleMoves();
 
 
-    // Hier intelligente Strategie zur Auswahl des Zuges einfügen
-    Move move = possibleMoves.get((int) (Math.random() * possibleMoves.size()));
-
+    Move move = possibleMoves.get(0);
     log.info("Sende {} nach {}ms.", move, System.currentTimeMillis() - startTime);
     return move;
   }

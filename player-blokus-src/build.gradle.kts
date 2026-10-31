@@ -2,6 +2,7 @@ plugins {
     java
     application
     id("com.gradleup.shadow") version "8.3.10"
+    kotlin("jvm") version "2.3.20"
 }
 
 sourceSets.main.get().java.srcDir("src/main")
@@ -18,16 +19,20 @@ repositories {
 }
 
 dependencies {
-    if(gradle.startParameter.isOffline) {
+    if (gradle.startParameter.isOffline) {
         implementation(fileTree("lib"))
     } else {
         implementation("com.github.software-challenge.backend", "plugin2027", "27.0.6")
         implementation("ch.qos.logback", "logback-classic", "1.5.32")
     }
+    testImplementation(kotlin("test"))
 }
 
 tasks.shadowJar {
     archiveBaseName.set("blokus_2027_client")
     archiveClassifier.set("")
     destinationDirectory.set(rootDir)
+}
+kotlin {
+    jvmToolchain(17)
 }
