@@ -1,5 +1,6 @@
 package sc.player;
 //Moin
+import kotlin.TuplesKt;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import sc.api.plugins.IGameState;
@@ -57,19 +58,12 @@ public class Logic implements IGameHandler {
       Move move = moves.get(i);
 
       try {
-        // Spielstand kopieren
-        GameState copy = gameState.clone();
 
-        // Zug simulieren
+        GameState copy = gameState.clone();
         copy.performMoveDirectly(move);
 
-        // Ergebnis bewerten
         int score = bewerten(copy, myTeam);
 
-        if (score > bestScore) {
-          bestScore = score;
-          bestMove = move;
-        }
 
       } catch (NoSuchMethodError e) {
 
@@ -84,73 +78,25 @@ public class Logic implements IGameHandler {
 
     return bestMove;
   }
-  private int minimax(
-          GameState state,
-          int depth,
-          ITeam myTeam,
-          long deadline) {
+  private int bewerten(GameState state, ITeam myTeam) {
 
-    if (depth == 0 ||
-            state.isOver() ||
-            System.nanoTime() >= deadline) {
-
-      return bewerten(state, myTeam);
-    }
-
-    List<Move> moves = state.getSensibleMoves();
-
-    if (moves.isEmpty()) {
-      return bewerten(state, myTeam);
-    }
-
-    boolean maximizing =
-            state.getCurrentTeam().equals(myTeam);
-
-    int best;
-
-    if (maximizing) {
-      best = Integer.MIN_VALUE;
-    } else {
-      best = Integer.MAX_VALUE;
-    }
-
-    int limit = Math.min(moves.size(), MAX_MOVES);
-
-    for (int i = 0; i < limit; i++) {
-
-      if (System.nanoTime() >= deadline) {
-        break;
-      }
-
-      GameState copy = state.clone();
-      copy.performMoveDirectly(moves.get(i));
-
-      int score = minimax(
-              copy,
-              depth - 1,
-              myTeam,
-              deadline
-      );
-
-      if (maximizing) {
-        best = Math.max(best, score);
-      } else {
-        best = Math.min(best, score);
-      }
-    }
-
-    return best;
-  }private int bewerten(GameState state, ITeam myTeam) {
-
-    ITeam enemyTeam = myTeam.equals(Team.ONE)
-            ? Team.TWO
-            : Team.ONE;
+    ITeam enemyTeam =
+            myTeam.equals(Team.ONE)
+                    ? Team.TWO
+                    : Team.ONE;
 
     int myPoints = state.getPointsForTeam(myTeam)[0];
-
     int enemyPoints = state.getPointsForTeam(enemyTeam)[0];
 
-    return myPoints - enemyPoints;
+    int score = 0;
+
+    // Teamführung
+    score += 1000 * (myPoints - enemyPoints);
+
+    // Mobilität
+    score += 25 * state.getSensibleMoves().size();
+
+    return score;
   }
 
   /** Ein neuer Spielstatus ist verfügbar, d.h. ein Zug wurde erfolgreich ausgeführt. */
