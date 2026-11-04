@@ -1,6 +1,6 @@
 package sc.player;
 //Moin
-import org.jetbrains.annotations.NotNull;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import sc.api.plugins.IGameState;
@@ -15,6 +15,11 @@ import sc.api.plugins.ITeam;
 import sc.api.plugins.Team;
 import sc.plugin2027.FieldContent;
 
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
 /**
  * Das Herz des Clients:
  * Eine simple Logik, die zufaellige gueltige Zuege macht.
@@ -23,204 +28,336 @@ import sc.plugin2027.FieldContent;
  */
 public class Logic implements IGameHandler {
   private static final int MAX_MOVES = 12;
-  private static final long TIME_LIMIT = 1_300_000_000L;
+  private static final long TIME_LIMIT = 1_500_000_000L;
   private static final Logger log = LoggerFactory.getLogger(Logic.class);
-
+  private volatile GameState gameState;
   /** Aktueller Spielstatus. */
-  private GameState gameState;
 
   /** In dieser Methode habt ihr 2 Sekunden (berechnet etwas Puffer ein) Zeit,
    * um euren nächsten Zug zu planen. */
-  @NotNull
+
   @Override
   public Move calculateMove() {
+    GameState state = this.gameState;
+    if (state == null) return null;
 
     long deadline = System.nanoTime() + TIME_LIMIT;
 
-    List<Move> moves = gameState.getSensibleMoves();
+    List<Move> moves = state.getSensibleMoves();
+    if (moves.isEmpty()) return null;
 
-    if (moves.isEmpty()) {
-      return null;
-    }
+    ITeam myTeam = state.getCurrentTeam();
 
-    ITeam myTeam = gameState.getCurrentTeam();
+    // STUFE 1: Schnelle Vorauswahl
+    List<Move> kandidaten = new ArrayList<>();
 
-    Move bestMove = moves.get(0);
-    int bestScore = Integer.MIN_VALUE;
+    Map<Move, Integer> bewertungen = new HashMap<>();
 
-    // Alle möglichen Züge ausprobieren
     for (Move move : moves) {
-
-      // Zeitlimit beachten
-      if (System.nanoTime() >= deadline) {
+      if (System.nanoTime() >= deadline - 500_000_000L) {
         break;
       }
 
       try {
-        // Spielstand kopieren
-        GameState copy = gameState.clone();
-
-        // Zug simulieren
+        GameState copy = state.clone();
         copy.performMoveDirectly(move);
 
-        // Minimax mit Tiefe 1
+        int score = schnellBewerten(copy, myTeam);
+
+        bewertungen.put(move, score);
+        kandidaten.add(move);
+
+      } catch (RuntimeException e) {
+        log.error("Fehler bei Vorauswahl: {}", e.getMessage());
+      }
+    }
+
+    if (kandidaten.isEmpty()) {
+      return moves.get(0);
+    }
+
+    kandidaten.sort((a, b) ->
+            Integer.compare(bewertungen.get(b), bewertungen.get(a)));
+
+    int anzahl = Math.min(7, kandidaten.size());
+
+    List<Move> besteZuege = new ArrayList<>(
+            kandidaten.subList(0, anzahl)
+    );
+
+    // STUFE 2: Minimax für die zehn besten Züge
+    Move bestMove = besteZuege.get(0);
+    int bestScore = Integer.MIN_VALUE;
+    int untersucht = 0;
+
+    for (Move move : besteZuege) {
+      if (System.nanoTime() >= deadline) break;
+
+      try {
+        GameState copy = state.clone();
+        copy.performMoveDirectly(move);
+
         int score = minimax(
-                gameState,
+                state,
                 copy,
-                1,
+                2,
                 myTeam,
+                Integer.MIN_VALUE,
+                Integer.MAX_VALUE,
                 deadline
         );
 
-        // Besseren Zug merken
         if (score > bestScore) {
           bestScore = score;
           bestMove = move;
         }
 
+        untersucht++;
+
       } catch (RuntimeException e) {
-        log.error("Fehler bei der Zugsimulation: {}", e.getMessage());
+        log.error("Fehler bei Minimax: {}", e.getMessage());
       }
     }
 
-    log.info("Gewählter Zug: {} | Bewertung: {}", bestMove, bestScore);
+    log.info(
+            "Gewählter Zug: {} | Bewertung: {} | Legale Züge: {} | Vorauswahl: {} | Minimax untersucht: {}",
+            bestMove, bestScore, moves.size(), anzahl, untersucht
+    );
 
     return bestMove;
   }
-  private int bewerten(GameState vorher, GameState nachher, ITeam myTeam) {
-
-    ITeam enemyTeam = myTeam.equals(Team.ONE) ? Team.TWO : Team.ONE;
-
+  private int schnellBewerten(GameState state, ITeam myTeam) {
     int score = 0;
 
-    // 1. Tatsächliche Spielpunkte
-    int myPoints = nachher.getPointsForTeam(myTeam)[0];
-    int enemyPoints = nachher.getPointsForTeam(enemyTeam)[0];
-
-    score += 1000 * (myPoints - enemyPoints);
-
-    // 2. Noch mögliche Züge
-    // 2. Mobilität des Gegners
-    score += bewerteMobilitaet(nachher, enemyTeam);
-
-    // 3. Steinbonus
-    score += steinBonus(nachher, myTeam);
-
-    // 4. Neue Felder untersuchen
-    var oldBoard = vorher.getBoard();
-    var newBoard = nachher.getBoard();
-
-    Color myColor = vorher.getCurrentColor();
-
-    Color partnerColor;
-
-    switch (myColor) {
-      case BLUE -> partnerColor = Color.RED;
-      case RED -> partnerColor = Color.BLUE;
-      case YELLOW -> partnerColor = Color.GREEN;
-      case GREEN -> partnerColor = Color.YELLOW;
-      default -> throw new IllegalStateException("Unbekannte Farbe");
-    }
-
-    int centerScore = 0;
-    int enemyContact = 0;
-    int partnerContact = 0;
-
-    int minPartnerDistance = Integer.MAX_VALUE;
+    // 1. Zentrum
+    var board = state.getBoard();
 
     for (int x = 0; x < 20; x++) {
       for (int y = 0; y < 20; y++) {
+        Color color = board.get(x, y).getContent().toTeamColor();
 
-        // Nur Felder betrachten, die gerade neu belegt wurden
-        if (oldBoard.get(x, y).getContent() == FieldContent.EMPTY
-                && newBoard.get(x, y).getContent() != FieldContent.EMPTY) {
+        if (color == null) continue;
 
-          // 5. Mitte bevorzugen
-          int distanceToCenter =
-                  Math.abs(x - 9) + Math.abs(y - 9);
+        int distance = Math.abs(x - 9) + Math.abs(y - 9);
+        int centerValue = Math.max(0, 10 - distance);
 
-            centerScore = (int) (centerScore + Math.max(0, 10 - distanceToCenter) * 1.5);
-
-          // 6. Nachbarfelder untersuchen
-          for (int dx = -1; dx <= 1; dx++) {
-            for (int dy = -1; dy <= 1; dy++) {
-
-              if (dx == 0 && dy == 0) continue;
-
-              int nx = x + dx;
-              int ny = y + dy;
-
-              if (nx < 0 || nx >= 20 || ny < 0 || ny >= 20)
-                continue;
-
-              Color neighborColor =
-                      newBoard.get(nx, ny).getContent().toTeamColor();
-
-              if (neighborColor == null || neighborColor == myColor)
-                continue;
-
-              // Gegnerkontakt
-              if (neighborColor.getTeam().equals(enemyTeam)) {
-                enemyContact++;
-              }
-
-              // Partnerkontakt
-              if (neighborColor == partnerColor) {
-                partnerContact++;
-              }
-            }
-          }
-
-          // 7. Abstand zum Partner
-          for (int px = 0; px < 20; px++) {
-            for (int py = 0; py < 20; py++) {
-
-              Color color =
-                      oldBoard.get(px, py).getContent().toTeamColor();
-
-              if (color == partnerColor) {
-
-                int distance =
-                        Math.abs(x - px) + Math.abs(y - py);
-
-                minPartnerDistance =
-                        Math.min(minPartnerDistance, distance);
-              }
-            }
-          }
+        if (color.getTeam().equals(myTeam)) {
+          score += centerValue;
+        } else {
+          score -= centerValue;
         }
       }
     }
 
-    score += centerScore;
-    score += enemyContact * 12;
-    score += partnerContact * 2;
-
-    // Abstand zum Partner nur in der Anfangsphase berücksichtigen
-    if (vorher.getRound() <= 4 && minPartnerDistance < 6) {
-      score -= (6 - minPartnerDistance) * 5;
-    }
+    // 2. Steinbonus
+    score += steinBonus(state, myTeam);
+    score -= steinBonus(state,
+            myTeam.equals(Team.ONE) ? Team.TWO : Team.ONE);
 
     return score;
   }
-  private int bewerteMobilitaet(GameState state, ITeam enemyTeam) {
+  private int bewerten(GameState state, ITeam myTeam) {
 
-    // Ist tatsächlich der Gegner am Zug?
-    if (!state.getCurrentTeam().equals(enemyTeam)) {
-      return 0;
-    }
-
-    // Anzahl der legalen Züge des Gegners
-    int enemyMoves = state.getSensibleMoves().size();
-
-    // Je mehr Züge der Gegner hat, desto schlechter für uns.
-    // Maximal 40 Züge werden berücksichtigt.
-    return -Math.min(enemyMoves, 40) * 5;
-  }
-  private int steinBonus(GameState state, ITeam myTeam) {
+    ITeam enemyTeam = myTeam.equals(Team.ONE)
+            ? Team.TWO : Team.ONE;
 
     int score = 0;
 
+    // 1. Tatsächliche Spielpunkte
+    int myPoints = state.getPointsForTeam(myTeam)[0];
+    int enemyPoints = state.getPointsForTeam(enemyTeam)[0];
+
+    score += 100 * (myPoints - enemyPoints);
+
+    // 2. Noch übrige Steine
+    score += steinBonus(state, myTeam);
+    score -= steinBonus(state, enemyTeam);
+
+    // 3. Brettmitte kontrollieren
+    var board = state.getBoard();
+
+    int myCenter = 0;
+    int enemyCenter = 0;
+
+    for (int x = 0; x < 20; x++) {
+      for (int y = 0; y < 20; y++) {
+
+        Color color = board.get(x, y).getContent().toTeamColor();
+        if (color == null) {
+          continue;
+        }
+        int distance = Math.abs(x - 9)
+                + Math.abs(y - 9);
+
+        int centerValue = Math.max(0, 10 - distance);
+
+        if (color.getTeam().equals(myTeam)) {
+          myCenter += centerValue;
+        } else {
+          enemyCenter += centerValue;
+        }
+      }
+    }
+
+    score += 6 * (myCenter - enemyCenter);
+
+    // 4. Zukunftsmöglichkeiten und diagonale Anlegestellen
+    int myFrontier = 0;
+    int enemyFrontier = 0;
+
+    for (Color color : farbenFuerTeam(myTeam)) {
+      myFrontier += Math.min(zaehleAnkerfelder(state, color), 35);
+    }
+
+    for (Color color : farbenFuerTeam(enemyTeam)) {
+      enemyFrontier += Math.min(zaehleAnkerfelder(state, color), 35);
+    }
+    // Gute eigene Anschlussmöglichkeiten sind wichtig.
+    // Viele gegnerische Anschlussmöglichkeiten sind schlecht.
+    score += 5 * (myFrontier - enemyFrontier);
+
+    // Eigene Anlegestellen in der Nähe des Gegners belohnen.
+    int myPressure = 0;
+    int enemyPressure = 0;
+    for (Color color : farbenFuerTeam(myTeam)) {
+      myPressure += Math.min(zaehleNaheAnkerfelder(state, color, enemyTeam), 15);
+    }
+    for (Color color : farbenFuerTeam(enemyTeam)) {
+      enemyPressure += Math.min(zaehleNaheAnkerfelder(state, color, myTeam), 15);
+    }
+    score += 2 * (myPressure - enemyPressure);
+    // 6. Bewegungsfreiheit des aktiven Spielers
+    score += bewerteMobilitaet(state, myTeam);
+
+    return score;
+  }
+  private Color[] farbenFuerTeam(ITeam team) {
+    if (team.equals(Team.ONE)) {
+      return new Color[]{Color.BLUE, Color.RED};
+    }
+    return new Color[]{Color.YELLOW, Color.GREEN};
+  }
+  private Color farbeBei(GameState state, int x, int y) {
+    if (x < 0 || x >= 20 || y < 0 || y >= 20) {
+      return null;
+    }
+    return state.getBoard().get(x, y).getContent().toTeamColor();
+  }
+
+  private boolean istAnkerfeld(GameState state,
+          int x, int y, Color color) {
+
+    // Das Feld muss leer sein.
+    if (farbeBei(state, x, y) != null) {
+      return false;
+    }
+    // Eigene Steine dürfen nicht direkt aneinandergrenzen.
+    int[][] gerade = {
+            {0, -1},
+            {0, 1},
+            {-1, 0},
+            {1, 0}
+    };
+
+    for (int[] richtung : gerade) {
+
+      Color nachbar = farbeBei(
+              state,
+              x + richtung[0],
+              y + richtung[1]
+      );
+
+      if (color.equals(nachbar)) {
+        return false;
+      }
+    }
+    // Es muss mindestens einen diagonalen Kontakt geben.
+    int[][] diagonal = {
+            {-1, -1},
+            {-1, 1},
+            {1, -1},
+            {1, 1}
+    };
+    for (int[] richtung : diagonal) {
+
+      Color nachbar = farbeBei(
+              state,
+              x + richtung[0],
+              y + richtung[1]
+      );
+
+      if (color.equals(nachbar)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private int zaehleAnkerfelder(GameState state, Color color) {
+    int count = 0;
+    for (int x = 0; x < 20; x++) {
+      for (int y = 0; y < 20; y++) {
+
+        if (istAnkerfeld(state, x, y, color)) {
+          count++;
+        }
+      }
+    }
+
+    return count;
+  }
+
+  private int zaehleNaheAnkerfelder(GameState state,
+                                    Color color, ITeam enemyTeam) {
+    int count = 0;
+    for (int x = 0; x < 20; x++) {
+      for (int y = 0; y < 20; y++) {
+        if (!istAnkerfeld(state, x, y, color)) {
+          continue;
+        }
+        boolean nahe = false;
+        for (int dx = -2; dx <= 2 && !nahe; dx++) {
+          for (int dy = -2; dy <= 2 && !nahe; dy++) {
+
+            if (dx == 0 && dy == 0) {
+              continue;
+            }
+            Color neighbor = farbeBei(
+                    state,
+                    x + dx,
+                    y + dy
+            );
+
+            if (neighbor != null
+                    && neighbor.getTeam().equals(enemyTeam)) {
+              nahe = true;
+            }
+          }
+        }
+        if (nahe) {
+          count++;
+        }
+      }
+    }
+
+    return count;
+  }
+  private int bewerteMobilitaet(GameState state, ITeam myTeam) {
+
+    ITeam currentTeam = state.getCurrentTeam();
+
+    int moves = state.getSensibleMoves().size();
+
+    moves = Math.min(moves, 60);
+
+    if (currentTeam.equals(myTeam)) {
+      return moves * 4;
+    }
+
+    return -moves * 3;
+  }
+  private int steinBonus(GameState state, ITeam myTeam) {
+    int score = 0;
     // Beide Farben des eigenen Teams bestimmen
     Color[] myColors;
 
@@ -235,18 +372,19 @@ public class Logic implements IGameHandler {
 
       for (PieceShape shape : state.undeployedPieceShapes(color)) {
         // Grundwert: Große Steine sollen möglichst früh gelegt werden
-        score -= shape.getSize() * 30;
+        score -= shape.getSize() * 40 +30;
 
         // Zusätzlicher Malus für schwierige Steine
         switch (shape) {
           // Besonders schwierig zu platzieren
-          case PENTO_X -> score -= 120;
+          case PENTO_X -> score -= 130;
           // Eher schwierige Pentominos
-          case PENTO_P, PENTO_W, PENTO_Y, PENTO_U -> score -= 70;
+          case PENTO_P, PENTO_W, PENTO_Y, PENTO_U -> score -= 90;
           // Ebenfalls etwas schwieriger
-          case PENTO_I, PENTO_T -> score -= 50;
-          case MONO -> score+=20;
-          case DOMINO -> score+=10;
+          case PENTO_T -> score -= 70;
+          case PENTO_I  -> score -= 50;
+          case MONO -> score+=100;
+          case DOMINO -> score+=30;
 
           // Für alle anderen Steine bleibt es beim Grundwert
           default -> {
@@ -258,27 +396,87 @@ public class Logic implements IGameHandler {
     return score;
   }
 
-  private int minimax(
-          GameState vorher,
-          GameState nachher,
-          int depth,
-          ITeam myTeam,
-          long deadline) {
-
-    // Abbruch, wenn die gewünschte Tiefe erreicht ist
-    // oder die verfügbare Zeit abgelaufen ist
-    if (depth == 0 || System.nanoTime() >= deadline) {
-      return bewerten(vorher, nachher, myTeam);
+  private int minimax(GameState basis, GameState state, int depth,
+          ITeam myTeam, int alpha, int beta, long deadline) {
+    // Abbruchbedingungen
+    if (depth == 0 || state.isOver() || System.nanoTime() >= deadline) {
+      return bewerten(state, myTeam);
     }
+    List<Move> moves = state.getSensibleMoves();
+    // Keine legalen Züge mehr
+    if (moves.isEmpty()) {
+      return bewerten(state, myTeam);
+    }
+    // Ist mein Team gerade am Zug?
+    boolean maximizing = state.getCurrentTeam().equals(myTeam);
 
-    return bewerten(vorher, nachher, myTeam);
+    int bestScore;
+
+    if (maximizing) {
+      bestScore = Integer.MIN_VALUE;
+    } else {
+      bestScore = Integer.MAX_VALUE;
+    }
+    boolean searchedAny = false;
+    for (Move move : moves) {
+
+      // Zeitlimit überprüfen
+      if (System.nanoTime() >= deadline) {
+        break;
+      }
+      // Spielstand kopieren
+      GameState child = state.clone();
+      try {
+        child.performMoveDirectly(move);
+      } catch (Throwable e) {
+        log.error("Fehler bei simuliertem Zug: " + move, e);
+        throw e;
+      }
+
+      // Nächste Ebene berechnen
+      int score = minimax(basis, child, depth - 1,
+              myTeam, alpha, beta, deadline);
+      if (maximizing) {
+        //Mein Team möchte den Wert maximieren
+        bestScore = Math.max(bestScore, score);
+        alpha = Math.max(alpha, bestScore);
+
+      } else {
+        // Gegner möchte meinen Wert minimieren
+        bestScore = Math.min(bestScore, score);
+        beta = Math.min(beta, bestScore);
+      }
+      searchedAny = true;
+      // Alpha-Beta-Abbruch
+      if (beta <= alpha) {
+        break;
+      }
+    }
+    if (!searchedAny) {
+      return bewerten(state, myTeam);
+    }
+    return bestScore;
   }
 
   /** Ein neuer Spielstatus ist verfügbar, d.h. ein Zug wurde erfolgreich ausgeführt. */
+//  @Override
+//  public void onUpdate(IGameState gameState) {
+//    this.gameState = (GameState) gameState;
+//    log.info("Zug: {} Dran: {}", gameState.getTurn(), gameState.getCurrentTeam());
+//  }
   @Override
   public void onUpdate(IGameState gameState) {
-    this.gameState = (GameState) gameState;
-    log.info("Zug: {} Dran: {}", gameState.getTurn(), gameState.getCurrentTeam());
+
+    GameState newState = (GameState) gameState;
+
+    this.gameState = newState;
+
+    log.info(
+            "UPDATE: Zug={}, Team={}, Farbe={}",
+            newState.getTurn(),
+            newState.getCurrentTeam(),
+            newState.getCurrentColor()
+    );
   }
 
   /** Wird aufgerufen, wenn das Spiel beendet ist. */
